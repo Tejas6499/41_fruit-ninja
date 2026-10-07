@@ -9,6 +9,26 @@ BOMB_BLACK = (30, 30, 30)
 FRUIT_COLORS = [(220, 60, 60), (230, 140, 40), (230, 200, 40), (90, 180, 90)]
 OVERLAY_COLOR = (0, 0, 0, 170)  # RGBA: black at ~2/3 opacity, dims the playfield
 
+STARTING_LIVES = 3
+
+# spawn_interval: frames between spawns (higher = fewer fruit on screen)
+# bomb_chance:    probability that a spawn is a bomb
+# speed_scale:    multiplier on launch speed
+DIFFICULTIES = {
+    "easy":   {"spawn_interval": 80, "bomb_chance": 0.08, "speed_scale": 0.9},
+    "medium": {"spawn_interval": 55, "bomb_chance": 0.15, "speed_scale": 1.0},
+    "hard":   {"spawn_interval": 35, "bomb_chance": 0.25, "speed_scale": 1.2},
+}
+
+# Keys offered on the game-over screen.
+DIFFICULTY_KEYS = {
+    pygame.K_e: "easy",
+    pygame.K_m: "medium",
+    pygame.K_h: "hard",
+}
+QUIT_KEY = pygame.K_q
+MENU_TEXT = "E - Easy   M - Medium   H - Hard   Q - Quit"
+
 # Fired when the pointer leaves the window (pygame 2.0.1+). None on older
 # versions, in which case it simply never matches an event type.
 WINDOW_LEAVE = getattr(pygame, "WINDOWLEAVE", None)
@@ -18,26 +38,35 @@ class GameEngine:
         self.width = width
         self.height = height
 
-        self.fruits = []
-        self.trail = []  # recent mouse positions, drawn as the "blade"
-        self._last_pos = None  # previous mouse position; None = no stroke yet
-
-        self.spawn_interval = 55  # frames between spawns
-        self._spawn_timer = 0
-        self.bomb_chance = 0.15
-        self.speed_scale = 1.0
-
-        self.lives = 3
-        self.score = 0
+        # Things that last for the whole session (built once).
         self.font = pygame.font.SysFont("Arial", 28)
         self.title_font = pygame.font.SysFont("Arial", 72, bold=True)
         self.final_score_font = pygame.font.SysFont("Arial", 36)
-        self.game_over = False
+        self.menu_font = pygame.font.SysFont("Arial", 24)
 
         # Semi-transparent sheet drawn over the playfield on game over.
-        # Built once here rather than every frame.
         self._overlay = pygame.Surface((width, height), pygame.SRCALPHA)
         self._overlay.fill(OVERLAY_COLOR)
+
+        # Everything that belongs to a single game is set up in start_game(),
+        # so the first game and every replay go through the same code.
+        self.start_game("medium")
+
+    def start_game(self, difficulty):
+        """Reset all per-game state and begin a new game on `difficulty`."""
+        settings = DIFFICULTIES[difficulty]
+        self.spawn_interval = settings["spawn_interval"]
+        self.bomb_chance = settings["bomb_chance"]
+        self.speed_scale = settings["speed_scale"]
+
+        self.fruits = []
+        self.trail = []  # recent mouse positions, drawn as the "blade"
+        self._last_pos = None  # previous mouse position; None = no stroke yet
+        self._spawn_timer = 0
+
+        self.lives = STARTING_LIVES
+        self.score = 0
+        self.game_over = False
 
     def spawn_fruit(self):
         x = random.randint(60, self.width - 60)
@@ -60,6 +89,22 @@ class GameEngine:
             # them (bombs included).
             self._last_pos = None
             self.trail.clear()
+        elif event.type == pygame.KEYDOWN:
+            self._handle_key(event.key)
+
+    def _handle_key(self, key):
+        # The menu only exists on the game-over screen; during a game
+        # these keys do nothing.
+        if not self.game_over:
+            return
+
+        if key in DIFFICULTY_KEYS:
+            self.start_game(DIFFICULTY_KEYS[key])
+        elif key == QUIT_KEY:
+            # Ask for the same shutdown as clicking the window's close
+            # button: main.py's loop sees QUIT, stops, and calls
+            # pygame.quit().
+            pygame.event.post(pygame.event.Event(pygame.QUIT))
 
     def _handle_motion(self, pos):
         x, y = pos
@@ -146,7 +191,10 @@ class GameEngine:
         center_y = self.height // 2
 
         title = self.title_font.render("GAME OVER", True, WHITE)
-        screen.blit(title, title.get_rect(center=(center_x, center_y - 40)))
+        screen.blit(title, title.get_rect(center=(center_x, center_y - 60)))
 
         final_score = self.final_score_font.render(f"Final Score: {self.score}", True, WHITE)
-        screen.blit(final_score, final_score.get_rect(center=(center_x, center_y + 40)))
+        screen.blit(final_score, final_score.get_rect(center=(center_x, center_y + 20)))
+
+        menu = self.menu_font.render(MENU_TEXT, True, WHITE)
+        screen.blit(menu, menu.get_rect(center=(center_x, center_y + 85)))
