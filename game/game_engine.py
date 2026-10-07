@@ -1,3 +1,5 @@
+import array
+import math
 import pygame
 import random
 from .fruit import Fruit
@@ -33,6 +35,101 @@ MENU_TEXT = "E - Easy   M - Medium   H - Hard   Q - Quit"
 # versions, in which case it simply never matches an event type.
 WINDOW_LEAVE = getattr(pygame, "WINDOWLEAVE", None)
 
+
+# --- Sound effects ----------------------------------------------------------
+# Generated in code, so the repo needs no audio files and no extra dependency
+# (the array module is part of Python's standard library). Each builder
+# returns one channel of samples as floats in the range -1.0 .. 1.0.
+
+def _slice_samples(rate):
+    """Short rising 'swish': a tone sweeping 700 -> 1700 Hz in 0.09 s."""
+    count = int(rate * 0.09)
+    samples = []
+    phase = 0.0
+    for i in range(count):
+        progress = i / count
+        frequency = 700 + 1000 * progress
+        phase += 2 * math.pi * frequency / rate
+        fade_out = (1 - progress) ** 2
+        samples.append(fade_out * math.sin(phase))
+    return _normalise(samples, 0.45)
+
+
+def _bomb_samples(rate):
+    """Low 'boom': muffled noise plus a 55 Hz thump, dying away over 0.45 s."""
+    count = int(rate * 0.45)
+    rng = random.Random(0)  # own generator, so the game's random stream is untouched
+    smoothing = 1 - math.exp(-2 * math.pi * 400 / rate)  # low-pass at ~400 Hz
+    samples = []
+    rumble = 0.0
+    for i in range(count):
+        t = i / rate
+        rumble += smoothing * (rng.uniform(-1, 1) - rumble)
+        thump = math.sin(2 * math.pi * 55 * t)
+        fade_out = math.exp(-8 * t) * (1 - i / count)
+        samples.append(fade_out * (4 * rumble + 0.6 * thump))
+    return _normalise(samples, 0.7)
+
+
+def _game_over_samples(rate):
+    """Three falling notes (G4, E4, C4), the last one held longer."""
+    samples = []
+    for frequency, seconds in ((392.00, 0.18), (329.63, 0.18), (261.63, 0.40)):
+        count = int(rate * seconds)
+        for i in range(count):
+            t = i / rate
+            fade_in = min(1.0, i / (rate * 0.01))  # 10 ms, avoids a click
+            fade_out = 1 - i / count
+            tone = (math.sin(2 * math.pi * frequency * t)
+                    + 0.3 * math.sin(2 * math.pi * 2 * frequency * t))
+            samples.append(fade_in * fade_out * tone)
+    return _normalise(samples, 0.4)
+
+
+def _normalise(samples, peak):
+    """Scale samples so the loudest one sits at `peak` (0.0 .. 1.0)."""
+    loudest = max(abs(s) for s in samples) or 1.0
+    return [s * peak / loudest for s in samples]
+
+
+SOUND_BUILDERS = {
+    "slice": _slice_samples,
+    "bomb": _bomb_samples,
+    "game_over": _game_over_samples,
+}
+
+
+def _build_sounds():
+    """Return {name: pygame.mixer.Sound}, or {} if audio isn't available.
+
+    An empty dict means "sound disabled": the game carries on silently.
+    """
+    try:
+        # main.py's pygame.init() normally starts the mixer already; if it
+        # couldn't (or wasn't asked to), try once here.
+        if pygame.mixer.get_init() is None:
+            pygame.mixer.init()
+        rate, sample_format, channels = pygame.mixer.get_init()
+
+        # The packing below writes signed 16-bit samples (pygame's default).
+        if sample_format != -16:
+            return {}
+
+        sounds = {}
+        for name, builder in SOUND_BUILDERS.items():
+            pcm = array.array("h")
+            for sample in builder(rate):
+                value = int(sample * 32767)
+                # Same signal on every output channel (mono, stereo, ...).
+                pcm.extend([value] * channels)
+            sounds[name] = pygame.mixer.Sound(buffer=pcm)
+        return sounds
+    except (pygame.error, NotImplementedError):
+        # pygame.error: no audio device / mixer failed to start.
+        # NotImplementedError: this pygame build has no mixer module.
+        return {}
+
+
 class GameEngine:
     def __init__(self, width, height):
         self.width = width
@@ -47,6 +144,11 @@ class GameEngine:
         # Semi-transparent sheet drawn over the playfield on game over.
         self._overlay = pygame.Surface((width, height), pygame.SRCALPHA)
         self._overlay.fill(OVERLAY_COLOR)
+
+        # Sound effects. Empty if there is no usable audio device, in which
+        # case _play() quietly does nothing.
+        self._sounds = _build_sounds()
+        self.sound_enabled = bool(self._sounds)
 
         # Everything that belongs to a single game is set up in start_game(),
         # so the first game and every replay go through the same code.
@@ -134,9 +236,24 @@ class GameEngine:
     def _slice(self, fruit):
         fruit.sliced = True
         if fruit.kind == "bomb":
-            self.game_over = True
+            self._play("bomb")
+            self._end_game()
         else:
             self.score += 1
+            self._play("slice")
+
+    def _end_game(self):
+        # The only place game_over is switched on, so the game-over sound
+        # plays exactly once per game however the game ended.
+        if self.game_over:
+            return
+        self.game_over = True
+        self._play("game_over")
+
+    def _play(self, name):
+        sound = self._sounds.get(name)
+        if sound is not None:
+            sound.play()
 
     def handle_input(self):
         # Reserved for continuously-held-key input; this game is
@@ -165,7 +282,7 @@ class GameEngine:
         self.fruits = still_alive
 
         if self.lives <= 0:
-            self.game_over = True
+            self._end_game()
 
     def render(self, screen):
         for fruit in self.fruits:
